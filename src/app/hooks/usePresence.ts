@@ -1,26 +1,9 @@
-// src/hooks/usePresence.ts
+// hooks/usePresence.ts
+'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
-// User-configurable settings - adjust these as needed
-const PRESENCE_SETTINGS = {
-  // How often to send heartbeats to the server (in milliseconds)
-  HEARTBEAT_INTERVAL: 30000, // 30 seconds
-  
-  // How often to refresh presence data via HTTP (if needed for fallback)
-  PRESENCE_REFRESH_INTERVAL: 60000, // 1 minute
-  
-  // WebSocket reconnection delay after disconnect
-  RECONNECT_DELAY: 5000, // 5 seconds
-  
-  // Maximum number of reconnection attempts
-  MAX_RECONNECT_ATTEMPTS: 5,
-  
-  // Timeout for initial connection attempts
-  CONNECTION_TIMEOUT: 10000, // 10 seconds
-} as const;
-
-interface UserPresence {
+interface PresenceUser {
   userId: string;
   username: string;
   joinedAt: number;
@@ -28,220 +11,352 @@ interface UserPresence {
 }
 
 interface UsePresenceOptions {
-  userId: string;
-  username: string;
+  userId?: string;
+  username?: string;
   enabled?: boolean;
+  roomKey?: string; // Allow different rooms
 }
 
-export function usePresence({ userId, username, enabled = true }: UsePresenceOptions) {
-  //the actual presence data
-  const [presence, setPresence] = useState<UserPresence[]>([]);
-  //is the user connected
+interface UsePresenceReturn {
+  presence: PresenceUser[];
+  otherUsers: PresenceUser[];
+  isConnected: boolean;
+  totalUsers: number;
+  currentUserId: string | null;
+  currentUsername: string | null;
+}
+
+// Generate a stable session ID that persists across refreshes but not across tabs in incognito
+function generateSessionId(): string {
+  // Only run in browser environment
+  if (typeof window === 'undefined') {
+    return `session_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+  }
+
+  // Try to get existing session ID from sessionStorage first
+  try {
+    const existing = sessionStorage.getItem('presence_session_id');
+    if (existing) {
+      console.log('🔄 Reusing existing session ID:', existing);
+      return existing;
+    }
+  } catch (e) {
+    // sessionStorage not available or blocked
+    console.log('⚠️ sessionStorage not available, using memory-only ID');
+  }
+
+  // Generate new session ID
+  const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+  
+  // Try to store it for this session
+  try {
+    sessionStorage.setItem('presence_session_id', sessionId);
+    console.log('💾 Stored new session ID:', sessionId);
+  } catch (e) {
+    // Can't store, but that's okay - will work for this page load
+    console.log('⚠️ Could not store session ID, using memory-only');
+  }
+  
+  return sessionId;
+}
+
+// Generate a tab-specific ID that's unique per tab but consistent across refreshes
+function generateTabId(): string {
+  // Only run in browser environment
+  if (typeof window === 'undefined') {
+    return `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  // For incognito mode compatibility, we use a combination approach:
+  // 1. Try sessionStorage (works in normal mode, per-tab)
+  // 2. Fall back to a combination of session + page load time
+  
+  let tabId: string;
+  
+  try {
+    const existing = sessionStorage.getItem('presence_tab_id');
+    if (existing) {
+      return existing;
+    }
+    
+    tabId = `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    sessionStorage.setItem('presence_tab_id', tabId);
+  } catch (e) {
+    // Fallback for when sessionStorage is not available
+    tabId = `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+  
+  return tabId;
+}
+
+// Generate or retrieve a persistent username for anonymous users
+function getOrGenerateUsername(sessionId: string): string {
+  // Only run in browser environment
+  if (typeof window === 'undefined') {
+    return `user-${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  const storageKey = `presence_username_${sessionId}`;
+  
+  try {
+    const existing = sessionStorage.getItem(storageKey);
+    if (existing) {
+      console.log('♻️ Reusing existing username:', existing);
+      return existing;
+    }
+  } catch (e) {
+    // sessionStorage not available
+  }
+
+  // Generate new username (you can replace this with your existing logic)
+  const adjectives = ['happy', 'clever', 'bright', 'swift', 'calm', 'bold', 'wise', 'kind'];
+  const animals = ['cat', 'dog', 'fox', 'owl', 'bear', 'wolf', 'deer', 'lion'];
+  
+  const username = `${adjectives[Math.floor(Math.random() * adjectives.length)]}-${animals[Math.floor(Math.random() * animals.length)]}`;
+  
+  try {
+    sessionStorage.setItem(storageKey, username);
+    console.log('💾 Stored new username:', username);
+  } catch (e) {
+    // Can't store, but that's okay
+  }
+  
+  return username;
+}
+
+export function usePresence({
+  userId: providedUserId,
+  username: providedUsername,
+  enabled = true,
+  roomKey = '/default'
+}: UsePresenceOptions = {}): UsePresenceReturn {
+  const [presence, setPresence] = useState<PresenceUser[]>([]);
   const [isConnected, setIsConnected] = useState(false);
-  //the userId & username of the current user
-  const [effectiveUserId, setEffectiveUserId] = useState<string>(userId);
-  const [effectiveUsername, setEffectiveUsername] = useState<string>(username);
-  //the websocket ref
+  const [isMounted, setIsMounted] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  //the heartbeat ref used to send heartbeats to the server to keep in touch client to server
   const heartbeatRef = useRef<NodeJS.Timeout | null>(null);
-  //reconnection tracking
-  const reconnectAttemptsRef = useRef<number>(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const mountedRef = useRef(true);
+  
+  // Generate stable IDs only after mount (client-side only)
+  const [sessionId, setSessionId] = useState<string>('');
+  const [tabId, setTabId] = useState<string>('');
+  const [effectiveUserId, setEffectiveUserId] = useState<string>('');
+  const [effectiveUsername, setEffectiveUsername] = useState<string>('');
 
-  //react to when we login we'll get a username 
-  //or if we logout we'll get null which will genreate a new userId
-  //userId gets made on server into a unique adject animal type random name
-  //used to keep same person online as same animal
-
+  // Initialize client-side IDs after mount
   useEffect(() => {
-    if (!enabled) return;
+    if (typeof window !== 'undefined') {
+      const newSessionId = generateSessionId();
+      const newTabId = generateTabId();
+      const newEffectiveUserId = providedUserId || `anon_${newSessionId}_${newTabId}`;
+      const newEffectiveUsername = providedUsername || getOrGenerateUsername(newSessionId);
+      
+      setSessionId(newSessionId);
+      setTabId(newTabId);
+      setEffectiveUserId(newEffectiveUserId);
+      setEffectiveUsername(newEffectiveUsername);
+      setIsMounted(true);
+      
+      console.log('🆔 Presence IDs initialized:', {
+        sessionId: newSessionId,
+        tabId: newTabId,
+        effectiveUserId: newEffectiveUserId,
+        effectiveUsername: newEffectiveUsername,
+        providedUserId,
+        providedUsername
+      });
+    }
+  }, [providedUserId, providedUsername]);
 
-    console.log('🔌 Initializing presence for:', username || 'anonymous');
-    console.log('⚙️ Using settings:', PRESENCE_SETTINGS);
+  const cleanup = useCallback(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close();
+    }
+    wsRef.current = null;
+  }, []);
 
-    let cleanup = false;
+  const joinPresence = useCallback(async () => {
+    if (!enabled || !effectiveUserId) return;
 
-    const initializePresence = async () => {
-      try {
-        // 1. Join presence via HTTP API
-        const joinPayload: any = {
+    try {
+      const response = await fetch('/__realtime/presence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: effectiveUserId,
+          username: effectiveUsername,
           action: 'join',
-          pathname: window.location.pathname
-        };
+          pathname: roomKey
+        })
+      });
 
-        // Only include userId and username if we have them (logged in users)
-        if (userId) {
-          joinPayload.userId = userId;
-        }
-        if (username) {
-          joinPayload.username = username;
-        }
+      if (!response.ok) {
+        throw new Error(`Failed to join presence: ${response.status}`);
+      }
 
-        const joinResponse = await fetch('/__realtime/presence', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(joinPayload)
-        });
+      const result = await response.json();
+      console.log('✅ Joined presence:', result);
+    } catch (error) {
+      console.error('❌ Failed to join presence:', error);
+      throw error;
+    }
+  }, [enabled, effectiveUserId, effectiveUsername, roomKey]);
 
-        if (joinResponse.ok) {
-          const joinResult = await joinResponse.json() as { userId: string; username: string; success: boolean };
-          // Server returns the effective userId and username (generated if anonymous)
-          setEffectiveUserId(joinResult.userId);
-          setEffectiveUsername(joinResult.username);
-          console.log('✅ Joined presence as:', joinResult.username, '(', joinResult.userId, ')');
+  const leavePresence = useCallback(async () => {
+    if (!effectiveUserId) return;
 
-          // 2. Establish WebSocket connection for real-time updates
-          const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/__realtime?key=${encodeURIComponent(window.location.pathname)}`;
-          const ws = new WebSocket(wsUrl);
-          wsRef.current = ws;
+    try {
+      await fetch('/__realtime/presence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: effectiveUserId,
+          action: 'leave',
+          pathname: roomKey
+        })
+      });
+      console.log('👋 Left presence');
+    } catch (error) {
+      console.error('❌ Failed to leave presence:', error);
+    }
+  }, [effectiveUserId, roomKey]);
 
-          ws.onopen = () => {
-            console.log('🔌 WebSocket connected');
-            setIsConnected(true);
-            reconnectAttemptsRef.current = 0; // Reset reconnect attempts on successful connection
+  const connectWebSocket = useCallback(async () => {
+    if (!enabled || !isMounted || !effectiveUserId || wsRef.current?.readyState === WebSocket.OPEN) return;
 
-            // Start sending heartbeats to associate this WebSocket with our user
-            const sendHeartbeat = () => {
-              if (ws.readyState === WebSocket.OPEN && !cleanup) {
-                ws.send(JSON.stringify({
-                  type: 'presence_heartbeat',
-                  userId: joinResult.userId  // ✅ Use the server-provided userId
-                }));
-                console.log('💓 Sent heartbeat for:', joinResult.userId);
-              }
-            };
+    try {
+      // First join presence
+      await joinPresence();
 
-            // Send initial heartbeat
-            sendHeartbeat();
+      // Then connect WebSocket
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/__realtime?key=${encodeURIComponent(roomKey)}`;
+      
+      console.log('🔌 Connecting WebSocket:', wsUrl);
+      
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
-            // Send heartbeat at configured interval
-            heartbeatRef.current = setInterval(sendHeartbeat, PRESENCE_SETTINGS.HEARTBEAT_INTERVAL);
-          };
-
-          ws.onmessage = (event) => {
-            try {
-              const data = JSON.parse(event.data);
-              console.log('📨 WebSocket message:', data);
-
-              if (data.type === 'presence_update') {
-                setPresence(data.data);
-                console.log('👥 Updated presence via WebSocket:', data.data);
-              }
-            } catch (error) {
-              console.error('❌ Failed to parse WebSocket message:', error);
-            }
-          };
-
-          ws.onclose = () => {
-            console.log('🔌 WebSocket disconnected');
-            setIsConnected(false);
-            if (heartbeatRef.current) {
-              clearInterval(heartbeatRef.current);
-              heartbeatRef.current = null;
-            }
-
-            // Attempt to reconnect if not cleaning up and haven't exceeded max attempts
-            if (!cleanup && reconnectAttemptsRef.current < PRESENCE_SETTINGS.MAX_RECONNECT_ATTEMPTS) {
-              reconnectAttemptsRef.current++;
-              console.log(`🔄 Attempting to reconnect (${reconnectAttemptsRef.current}/${PRESENCE_SETTINGS.MAX_RECONNECT_ATTEMPTS})...`);
-              
-              reconnectTimeoutRef.current = setTimeout(() => {
-                if (!cleanup) {
-                  initializePresence();
-                }
-              }, PRESENCE_SETTINGS.RECONNECT_DELAY);
-            }
-          };
-
-          ws.onerror = (error) => {
-            console.error('❌ WebSocket error:', error);
-            setIsConnected(false);
-          };
-
-          // 3. Initial presence fetch
-          const response = await fetch(`/__realtime/presence?key=${encodeURIComponent(window.location.pathname)}`, {
-            method: 'GET'
-          });
-          
-          if (response.ok) {
-            const presenceData = await response.json() as UserPresence[];
-            setPresence(presenceData);
-            console.log('👥 Initial presence:', presenceData);
-          }
-        }
-
-      } catch (error) {
-        console.error('❌ Failed to initialize presence:', error);
-        setIsConnected(false);
+      ws.onopen = () => {
+        console.log('✅ WebSocket connected');
+        setIsConnected(true);
         
-        // Attempt to reconnect on error if not cleaning up
-        if (!cleanup && reconnectAttemptsRef.current < PRESENCE_SETTINGS.MAX_RECONNECT_ATTEMPTS) {
-          reconnectAttemptsRef.current++;
-          console.log(`🔄 Retrying after error (${reconnectAttemptsRef.current}/${PRESENCE_SETTINGS.MAX_RECONNECT_ATTEMPTS})...`);
-          
+        // Start heartbeat
+        if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+        heartbeatRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN && effectiveUserId) {
+            ws.send(JSON.stringify({
+              type: 'presence_heartbeat',
+              userId: effectiveUserId,
+              timestamp: Date.now()
+            }));
+            console.log('💓 Sent heartbeat for:', effectiveUserId);
+          }
+        }, 20000); // Send heartbeat every 20 seconds
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'presence_update') {
+            setPresence(data.data || []);
+            console.log('📡 Received presence update:', data.data);
+          }
+        } catch (error) {
+          console.error('❌ Failed to parse WebSocket message:', error);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('🔌 WebSocket disconnected');
+        setIsConnected(false);
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
+        
+        // Attempt to reconnect after a delay if still mounted
+        if (mountedRef.current && enabled) {
           reconnectTimeoutRef.current = setTimeout(() => {
-            if (!cleanup) {
-              initializePresence();
-            }
-          }, PRESENCE_SETTINGS.RECONNECT_DELAY);
+            console.log('🔄 Attempting to reconnect...');
+            connectWebSocket();
+          }, 3000);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('❌ WebSocket error:', error);
+        setIsConnected(false);
+      };
+
+    } catch (error) {
+      console.error('❌ Failed to connect:', error);
+      // Retry connection after delay
+      if (mountedRef.current && enabled) {
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connectWebSocket();
+        }, 5000);
+      }
+    }
+  }, [enabled, joinPresence, effectiveUserId, roomKey, isMounted]);
+
+  // Connect on mount and when dependencies change
+  useEffect(() => {
+    if (enabled && isMounted && effectiveUserId) {
+      connectWebSocket();
+    }
+    
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+    };
+  }, [enabled, connectWebSocket, cleanup, isMounted, effectiveUserId]);
+
+  // Leave presence on unmount
+  useEffect(() => {
+    return () => {
+      leavePresence();
+    };
+  }, [leavePresence]);
+
+  // Handle page visibility changes
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        console.log('📱 Page hidden, maintaining connection');
+        // Keep connection alive but reduce heartbeat frequency could be added here
+      } else {
+        console.log('📱 Page visible, ensuring connection');
+        if (!isConnected && enabled && isMounted && effectiveUserId) {
+          connectWebSocket();
         }
       }
     };
 
-    initializePresence();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [isConnected, enabled, connectWebSocket, isMounted, effectiveUserId]);
 
-    // Cleanup function
-    return () => {
-      cleanup = true;
-      
-      // Clear heartbeat interval
-      if (heartbeatRef.current) {
-        clearInterval(heartbeatRef.current);
-        heartbeatRef.current = null;
-      }
-
-      // Clear reconnect timeout
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-
-      // Close WebSocket
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      
-      // Send leave signal
-      if (effectiveUserId) {
-        fetch('/__realtime/presence', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: effectiveUserId,
-            action: 'leave',
-            pathname: window.location.pathname
-          })
-        }).catch(() => {});
-      }
-      
-      setIsConnected(false);
-      setPresence([]);
-    };
-  }, [userId, username, enabled]);
-
+  // Filter out current user from presence list
   const otherUsers = presence.filter(user => user.userId !== effectiveUserId);
-
+  
   return {
     presence,
     otherUsers,
-    isConnected,
+    isConnected: isConnected && isMounted,
     totalUsers: presence.length,
-    currentUser: presence.find(user => user.userId === effectiveUserId),
-    effectiveUserId,
-    effectiveUsername,
-    // Expose settings for debugging/monitoring
-    settings: PRESENCE_SETTINGS
+    currentUserId: isMounted ? effectiveUserId : null,
+    currentUsername: isMounted ? effectiveUsername : null
   };
 }

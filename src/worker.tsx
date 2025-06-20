@@ -9,9 +9,9 @@ import { sessions, setupSessionStore } from "./session/store";
 import { Session } from "./session/durableObject";
 import { type User, db, setupDb } from "@/db";
 import { env } from "cloudflare:workers";
+import Room from "@/app/pages/Room";
 
 export { SessionDurableObject } from "./session/durableObject";
-// Export your custom presence-enabled Durable Object
 export { PresenceDurableObject as RealtimeDurableObject } from "./durableObjects/presenceDurableObject";
 
 export type AppContext = {
@@ -109,7 +109,13 @@ export default defineApp([
   
   render(Document, [
     // 🚫 NON-REALTIME ROUTES (auth, simple pages)
-    route("/", () => new Response("Hello, World!")),
+    // route("/", () => new Response("Hello, World!")),
+    route("/", ({ctx}) => {
+      return <Room currentUser={ctx.user} />;
+    }),
+    route("/room", ({ctx}) => {
+      return <Room currentUser={ctx.user} />;
+    }),
     prefix("/user", userRoutes), // 🔑 AUTH ROUTES - NO REALTIME
     route("/protected", [
       ({ ctx }) => {

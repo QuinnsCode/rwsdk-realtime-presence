@@ -20,6 +20,7 @@ const REALTIME_ROUTES = [
   '/orders/',
   '/dashboard',
   '/arena',
+  '/room',
 ];
 
 function shouldUseRealtime(pathname: string): boolean {

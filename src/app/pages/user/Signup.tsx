@@ -34,6 +34,9 @@ export default function Signup() {
         setResult("Registration failed");
       } else {
         setResult("Registration successful!");
+        setTimeout(() => {
+          window.location.pathname = "/room";
+        }, 2300);
       }
     } catch (error) {
       console.error('Registration error:', error);

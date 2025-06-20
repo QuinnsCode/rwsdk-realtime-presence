@@ -9,18 +9,19 @@ interface PresenceClientProps {
 }
 
 export default function PresenceClient({ currentUser }: PresenceClientProps) {
-  const { presence, otherUsers, isConnected, totalUsers } = usePresence({
-    userId: currentUser?.id || '',
-    username: currentUser?.username || '',
-    enabled: true // Always enable presence tracking
+  const { presence, otherUsers, isConnected, totalUsers, currentUserId, currentUsername } = usePresence({
+    userId: currentUser?.id, // Will use generated ID if null
+    username: currentUser?.username, // Will use generated username if null
+    enabled: true,
+    roomKey: window?.location.pathname // Different rooms for different pages
   });
 
-  // some debug console logging
   console.log('🐛 PRESENCE DEBUG:', {
     currentUser: currentUser?.username,
+    currentUserId,
+    currentUsername,
     totalUsers,
     otherUsers,
-    presence,
     isConnected
   });
 
