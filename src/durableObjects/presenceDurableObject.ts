@@ -96,6 +96,12 @@ export class PresenceDurableObject extends RealtimeDurableObject {
           return response;
         }
 
+        // Send current presence immediately when WebSocket connects
+        response.webSocket.addEventListener('open', () => {
+          console.log('🔌 WebSocket opened, sending current presence immediately');
+          this.sendPresenceToConnection(response.webSocket!);
+        });
+
         response.webSocket.addEventListener('close', () => {
           const userId = this.wsToUser.get(response.webSocket!);
           if (userId) {
@@ -358,11 +364,15 @@ export class PresenceDurableObject extends RealtimeDurableObject {
           if (this.pendingReconnects.has(data.userId)) {
             this.pendingReconnects.delete(data.userId);
             console.log(`✅ User ${user.username} fully reconnected via heartbeat`);
-            this.broadcastPresenceUpdate(); // Broadcast since they're back
           }
           
-          // Send current presence to this connection
+          // Always send current presence to this connection (including themselves)
           this.sendPresenceToConnection(ws);
+          
+          // Broadcast updated presence to all connections
+          this.broadcastPresenceUpdate();
+        } else {
+          console.log('❌ User not found in presence map:', data.userId);
         }
         return;
       }

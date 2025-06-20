@@ -205,6 +205,19 @@ export function usePresence({
 
       const result = await response.json();
       console.log('✅ Joined presence:', result);
+      
+      // Immediately fetch current presence data to populate the UI
+      try {
+        const presenceResponse = await fetch(`/__realtime/presence?key=${encodeURIComponent(roomKey)}`);
+        if (presenceResponse.ok) {
+          const presenceData = await presenceResponse.json();
+          console.log('📡 Fetched immediate presence data:', presenceData);
+          setPresence(presenceData);
+        }
+      } catch (error) {
+        console.error('❌ Failed to fetch immediate presence:', error);
+      }
+      
     } catch (error) {
       console.error('❌ Failed to join presence:', error);
       throw error;
@@ -250,6 +263,16 @@ export function usePresence({
         console.log('✅ WebSocket connected');
         setIsConnected(true);
         
+        // Immediately request current presence data
+        if (ws.readyState === WebSocket.OPEN) {
+          const requestMessage = {
+            type: 'request_presence',
+            userId: effectiveUserId
+          };
+          ws.send(JSON.stringify(requestMessage));
+          console.log('📡 Requested initial presence data:', requestMessage);
+        }
+        
         // Start heartbeat
         if (heartbeatRef.current) clearInterval(heartbeatRef.current);
         heartbeatRef.current = setInterval(() => {
@@ -268,8 +291,12 @@ export function usePresence({
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'presence_update') {
-            setPresence(data.data || []);
             console.log('📡 Received presence update:', data.data);
+            console.log('🆔 Current effective user ID:', effectiveUserId);
+            console.log('🆔 Current provided user ID:', providedUserId);
+            
+            // Set the full presence array (including yourself)
+            setPresence(data.data || []);
           }
         } catch (error) {
           console.error('❌ Failed to parse WebSocket message:', error);
@@ -348,14 +375,43 @@ export function usePresence({
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [isConnected, enabled, connectWebSocket, isMounted, effectiveUserId]);
 
-  // Filter out current user from presence list
-  const otherUsers = presence.filter(user => user.userId !== effectiveUserId);
+  // Filter out current user from "other users" list only
+  // Keep full presence array for total count
+  const otherUsers = presence.filter(user => {
+    // For logged-in users, filter by actual user ID
+    if (providedUserId && user.userId === providedUserId) {
+      console.log('🚫 Filtering out logged-in user from others list:', user.userId);
+      return false;
+    }
+    // For anonymous users, filter by effective user ID
+    if (!providedUserId && user.userId === effectiveUserId) {
+      console.log('🚫 Filtering out anonymous user from others list:', user.userId);
+      return false;
+    }
+    return true;
+  });
+
+  // Find current user in presence for debugging
+  const currentUserInPresence = presence.find(user => {
+    if (providedUserId) return user.userId === providedUserId;
+    return user.userId === effectiveUserId;
+  });
+
+  console.log('👥 Presence debug:', {
+    totalPresence: presence.length,
+    otherUsers: otherUsers.length,
+    currentUserInPresence: currentUserInPresence?.username,
+    providedUserId,
+    effectiveUserId,
+    presenceUserIds: presence.map(p => p.userId),
+    isMounted
+  });
   
   return {
     presence,
     otherUsers,
     isConnected: isConnected && isMounted,
-    totalUsers: presence.length,
+    totalUsers: presence.length, // Total count including yourself
     currentUserId: isMounted ? effectiveUserId : null,
     currentUsername: isMounted ? effectiveUsername : null
   };
