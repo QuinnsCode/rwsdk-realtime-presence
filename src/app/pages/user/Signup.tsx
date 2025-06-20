@@ -6,7 +6,6 @@ import {
   finishPasskeyRegistration,
   startPasskeyRegistration,
 } from "./functions";
-import { AuthLayout } from "@/app/layouts/AuthLayout";
 
 export default function Signup() {
   const [username, setUsername] = useState("");
@@ -47,7 +46,7 @@ export default function Signup() {
   };
 
   return (
-    <AuthLayout>
+    <div>
       <h1 className="text-4xl font-bold text-red-500">Sign up</h1>
       <input
         type="text"
@@ -59,6 +58,7 @@ export default function Signup() {
         {isPending ? "..." : "Register with passkey"}
       </button>
       {result && <div>{result}</div>}
-    </AuthLayout>
+  
+    </div>
   );
 }
