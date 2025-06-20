@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "rwsdk-realtime-presence", 
+  "name": "~~~~CHANGE ME 1 ~~~~~~", 
   "main": "src/worker.tsx",
   "compatibility_date": "2024-09-23",
   "compatibility_flags": ["nodejs_compat"],
@@ -27,7 +27,7 @@
     ]
   },
   "vars": {
-    "WEBAUTHN_APP_NAME": "rwsdk-realtime-presence"
+    "WEBAUTHN_APP_NAME": "~~~~CHANGE ME 2 ~~~~~~"
   },
   "migrations": [
     {
@@ -42,8 +42,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "rwsdk-realtime-presence-db",
-      "database_id": "e69a4300-6e66-4ede-9068-fe283b0a3da5"
+      "database_name": "~~~~CHANGE ME 3 ~~~~~~",
+      "database_id": "~~~~CHANGE ME 4 ~~~~~~"
     }
   ]
 }
